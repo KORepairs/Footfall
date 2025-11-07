@@ -3,6 +3,7 @@ from datetime import date
 from typing import List, Tuple
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh  # <- auto-refresh helper
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
 
@@ -119,7 +120,7 @@ def flush_if_needed(force: bool = False):
             st.toast("Database sync failed — will retry automatically.", icon="⚠️")
 
 # auto-refresh UI so timers/summary update (15s)
-st.autorefresh(interval=15000, key="tick")
+st_autorefresh(interval=15000, key="tick")
 
 # ---------------- Styles (big coloured circles) ----------------
 st.markdown("""
