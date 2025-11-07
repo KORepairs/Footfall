@@ -7,8 +7,13 @@ from streamlit_autorefresh import st_autorefresh
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
 
-# ---------------- Config ----------------
-st.set_page_config(page_title="KO Repairs Footfall", layout="centered")
+# ---------------- Page config ----------------
+st.set_page_config(
+    page_title="KO Repairs — Footfall",
+    page_icon="🏪",
+    layout="centered"
+)
+
 DB_URL = st.secrets["DB_URL"]  # e.g. .../railway?sslmode=require
 
 # Batch/flush settings
@@ -27,7 +32,7 @@ def init_db():
     """Ensure table exists; add 'day' if missing; add indexes."""
     conn = get_db()
     with conn.cursor() as cur:
-        # Create base table (earlier versions had no 'day' column)
+        # Base table (older versions had no 'day' column)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS footfall (
                 id SERIAL PRIMARY KEY,
@@ -70,7 +75,6 @@ def db_summary_for_day(d: date) -> Tuple[int, int]:
                 WHERE day = %s;
             """, (d,))
         else:
-            # Fallback for earliest installs (shouldn't happen after init_db)
             cur.execute("""
                 SELECT
                   COALESCE(SUM(CASE WHEN type='total' THEN count END),0) AS total,
@@ -166,10 +170,11 @@ def flush_if_needed(force: bool = False):
 # auto-refresh UI so timers/summary update (15s)
 st_autorefresh(interval=15000, key="tick")
 
-# ---------------- Styles (big coloured circles) ----------------
+# ---------------- Styles (BIG COLOURED CIRCLES) ----------------
 st.markdown("""
 <style>
-div.circle-btn > button {
+/* 1) Make all top-row buttons circular & big */
+div.stButton > button {
   width: 180px !important;
   height: 180px !important;
   border-radius: 9999px !important;
@@ -182,16 +187,25 @@ div.circle-btn > button {
   box-shadow: 0 6px 14px rgba(0,0,0,0.15);
   transition: transform 0.02s ease-in;
 }
-div.circle-btn > button:active { transform: scale(0.98); }
-div.walkin > button { background: #22c55e; color: white; }        /* green */
-div.operational > button { background: #f59e0b; color: #1f2937; } /* amber */
-div.undo > button { background: #ef4444; color: white; }          /* red */
-div.sync > button { background: #3b82f6; color: white; }          /* blue */
+div.stButton > button:active { transform: scale(0.98); }
+
+/* 2) Colour the FOUR main buttons by column order (walk-in, operational, undo, sync) */
+section.main > div:has(div[data-testid="stHorizontalBlock"]) div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(1) div.stButton > button { background:#22c55e !important; color:#fff !important; }  /* green */
+section.main > div:has(div[data-testid="stHorizontalBlock"]) div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(2) div.stButton > button { background:#f59e0b !important; color:#1f2937 !important; } /* amber */
+section.main > div:has(div[data-testid="stHorizontalBlock"]) div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(3) div.stButton > button { background:#ef4444 !important; color:#fff !important; } /* red */
+section.main > div:has(div[data-testid="stHorizontalBlock"]) div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(4) div.stButton > button { background:#3b82f6 !important; color:#fff !important; } /* blue */
+
+/* 3) Keep other small buttons (Admin area) normal size */
+details[open] div.stButton > button,
+details div.stButton > button {
+  width:auto !important; height:auto !important; border-radius:8px !important; box-shadow:none !important;
+  font-size:14px !important; padding:8px 12px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------- UI ----------------
-st.title("🏪 KO Repairs — Footfall")
+st.title("KO Repairs — Footfall")
 
 selected = st.date_input("📅 Select Date", value=st.session_state.selected_day, max_value=date.today())
 if selected != st.session_state.selected_day:
@@ -200,21 +214,16 @@ if selected != st.session_state.selected_day:
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.markdown('<div class="circle-btn walkin">', unsafe_allow_html=True)
     if st.button("👣\nSomeone\nWalks In", key="walkin_btn"):
         enqueue("total", st.session_state.selected_day, 1)
         st.toast("Walk-in queued", icon="👣")
-    st.markdown("</div>", unsafe_allow_html=True)
 
 with col2:
-    st.markdown('<div class="circle-btn operational">', unsafe_allow_html=True)
     if st.button("🛠️\nDrop-off /\nPick-up /\nPop-in", key="oper_btn"):
         enqueue("operational", st.session_state.selected_day, 1)
         st.toast("Operational queued", icon="🛠️")
-    st.markdown("</div>", unsafe_allow_html=True)
 
 with col3:
-    st.markdown('<div class="circle-btn undo">', unsafe_allow_html=True)
     if st.button("↩️\nUndo\nLast", key="undo_btn"):
         # undo from queue first (unflushed), else from DB
         idx = next((i for i in range(len(st.session_state.queue)-1, -1, -1)
@@ -227,13 +236,10 @@ with col3:
                 st.toast("Undid last flushed entry", icon="↩️")
             else:
                 st.toast("No entries to remove", icon="ℹ️")
-    st.markdown("</div>", unsafe_allow_html=True)
 
 with col4:
-    st.markdown('<div class="circle-btn sync">', unsafe_allow_html=True)
     if st.button("🔄\nSync\nNow", key="sync_btn"):
         flush_if_needed(force=True)
-    st.markdown("</div>", unsafe_allow_html=True)
 
 st.divider()
 
@@ -259,6 +265,7 @@ with st.expander("🛠️ Admin"):
                 st.success("Schema updated. Reload the page.")
             except Exception:
                 st.error("Failed to update schema. Check DB_URL/permissions.")
+
 st.caption(
     "Green = everyone entering; Amber = repair visits. "
     "Clicks are queued for speed and synced every 10 min (or when queue is large / Sync Now). "
