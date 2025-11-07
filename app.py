@@ -1,13 +1,12 @@
 import time
 from datetime import date
-from typing import List, Tuple
 
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
 
-# ---------------- Page config ----------------
+# --------------- Page config ---------------
 st.set_page_config(
     page_title="KO Repairs — Footfall",
     page_icon="🏪",
@@ -20,7 +19,7 @@ DB_URL = st.secrets["DB_URL"]  # e.g. .../railway?sslmode=require
 FLUSH_SECONDS = 600   # flush every 10 minutes
 FLUSH_MAX = 50        # or when queue reaches this many rows
 
-# ---------------- DB (pooled) ----------------
+# --------------- DB (pooled) ---------------
 @st.cache_resource(show_spinner=False)
 def get_db():
     """Keep a persistent DB connection for speed."""
@@ -32,7 +31,6 @@ def init_db():
     """Ensure table exists; add 'day' if missing; add indexes."""
     conn = get_db()
     with conn.cursor() as cur:
-        # Base table (older versions had no 'day' column)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS footfall (
                 id SERIAL PRIMARY KEY,
@@ -41,16 +39,14 @@ def init_db():
                 count INTEGER NOT NULL DEFAULT 1
             );
         """)
-        # Add missing 'day' column (idempotent)
         cur.execute("""
             ALTER TABLE footfall
             ADD COLUMN IF NOT EXISTS day DATE NOT NULL DEFAULT CURRENT_DATE;
         """)
-        # Helpful indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_footfall_day ON footfall(day);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_footfall_ts_date ON footfall((DATE(ts)));")
 
-def has_day_column() -> bool:
+def has_day_column():
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute("""
@@ -61,9 +57,8 @@ def has_day_column() -> bool:
         """)
         return bool(cur.fetchone()["has_day"])
 
-def db_summary_for_day(d: date) -> Tuple[int, int]:
-    """Return (total, operational) for a given day.
-       Works even if old rows pre-date the 'day' column."""
+def db_summary_for_day(d):
+    """Return (total, operational) for a given day."""
     conn = get_db()
     with conn.cursor() as cur:
         if has_day_column():
@@ -85,7 +80,7 @@ def db_summary_for_day(d: date) -> Tuple[int, int]:
         r = cur.fetchone() or {"total": 0, "operational": 0}
         return (r["total"] or 0, r["operational"] or 0)
 
-def db_undo_last_for_day(d: date) -> bool:
+def db_undo_last_for_day(d):
     """Remove most recent flushed DB entry for the selected day."""
     conn = get_db()
     with conn.cursor() as cur:
@@ -113,7 +108,7 @@ def db_undo_last_for_day(d: date) -> bool:
             """, (d,))
         return cur.fetchone() is not None
 
-def db_flush_batch(rows: List[Tuple[str, date, int]]):
+def db_flush_batch(rows):
     """Bulk insert queued rows: (type, day, count)."""
     if not rows:
         return
@@ -121,7 +116,7 @@ def db_flush_batch(rows: List[Tuple[str, date, int]]):
     with conn.cursor() as cur:
         execute_values(cur, "INSERT INTO footfall (type, day, count) VALUES %s", rows)
 
-# ---------------- App state ----------------
+# --------------- App state ---------------
 init_db()
 
 if "selected_day" not in st.session_state:
@@ -129,17 +124,17 @@ if "selected_day" not in st.session_state:
 
 if "queue" not in st.session_state:
     # queue holds tuples: (type, day, count)
-    st.session_state.queue: List[Tuple[str, date, int]] = []
+    st.session_state.queue = []
 
 if "last_flush" not in st.session_state:
     st.session_state.last_flush = time.time()
 
-def pending_adjustments_for_day(d: date):
-    tot = sum(c for (t, day, c) in st.session_state.queue if day == d and t == "total")
-    op  = sum(c for (t, day, c) in st.session_state.queue if day == d and t == "operational")
+def pending_adjustments_for_day(d):
+    tot = sum(c for (t, day_val, c) in st.session_state.queue if day_val == d and t == "total")
+    op = sum(c for (t, day_val, c) in st.session_state.queue if day_val == d and t == "operational")
     return tot, op
 
-def get_summary(d: date):
+def get_summary(d):
     db_total, db_op = db_summary_for_day(d)
     q_total, q_op = pending_adjustments_for_day(d)
     total = db_total + q_total
@@ -150,10 +145,10 @@ def get_summary(d: date):
         "opportunities": max(0, total - operational)
     }
 
-def enqueue(event_type: str, d: date, count: int = 1):
+def enqueue(event_type, d, count=1):
     st.session_state.queue.append((event_type, d, count))
 
-def flush_if_needed(force: bool = False):
+def flush_if_needed(force=False):
     now = time.time()
     due = (now - st.session_state.last_flush >= FLUSH_SECONDS) or (len(st.session_state.queue) >= FLUSH_MAX)
     if force or due:
@@ -164,16 +159,14 @@ def flush_if_needed(force: bool = False):
             if force:
                 st.toast("Synced to database", icon="✅")
         except Exception:
-            # keep the queue intact if flush fails
             st.toast("Database sync failed — will retry automatically.", icon="⚠️")
 
 # auto-refresh UI so timers/summary update (15s)
 st_autorefresh(interval=15000, key="tick")
 
-# ---------------- Styles (BIG COLOURED CIRCLES) ----------------
+# --------------- Styles (BIG COLOURED CIRCLES) ---------------
 st.markdown("""
 <style>
-/* 1) Make all top-row buttons circular & big */
 div.stButton > button {
   width: 180px !important;
   height: 180px !important;
@@ -183,28 +176,39 @@ div.stButton > button {
   line-height: 1.2 !important;
   white-space: normal !important;
   padding: 16px !important;
-  border: 0 !important;
-  box-shadow: 0 6px 14px rgba(0,0,0,0.15);
+  border: none !important;
+  box-shadow: 0 6px 14px rgba(0,0,0,0.25) !important;
   transition: transform 0.02s ease-in;
+  color: #fff !important;
 }
-div.stButton > button:active { transform: scale(0.98); }
+div.stButton > button:active { transform: scale(0.97); }
 
-/* 2) Colour the FOUR main buttons by column order (walk-in, operational, undo, sync) */
-section.main > div:has(div[data-testid="stHorizontalBlock"]) div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(1) div.stButton > button { background:#22c55e !important; color:#fff !important; }  /* green */
-section.main > div:has(div[data-testid="stHorizontalBlock"]) div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(2) div.stButton > button { background:#f59e0b !important; color:#1f2937 !important; } /* amber */
-section.main > div:has(div[data-testid="stHorizontalBlock"]) div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(3) div.stButton > button { background:#ef4444 !important; color:#fff !important; } /* red */
-section.main > div:has(div[data-testid="stHorizontalBlock"]) div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(4) div.stButton > button { background:#3b82f6 !important; color:#fff !important; } /* blue */
+/* hard override colours (works in dark theme) */
+[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(1) div.stButton > button {
+  background-color: #16a34a !important; /* green */
+}
+[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(2) div.stButton > button {
+  background-color: #f59e0b !important; color: #1f2937 !important; /* amber */
+}
+[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(3) div.stButton > button {
+  background-color: #dc2626 !important; /* red */
+}
+[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-of-type(4) div.stButton > button {
+  background-color: #2563eb !important; /* blue */
+}
 
-/* 3) Keep other small buttons (Admin area) normal size */
-details[open] div.stButton > button,
+/* keep admin buttons normal */
 details div.stButton > button {
-  width:auto !important; height:auto !important; border-radius:8px !important; box-shadow:none !important;
+  width:auto !important; height:auto !important;
+  border-radius:8px !important; box-shadow:none !important;
   font-size:14px !important; padding:8px 12px !important;
+  background: var(--background-color) !important;
+  color: var(--text-color) !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- UI ----------------
+# --------------- UI ---------------
 st.title("KO Repairs — Footfall")
 
 selected = st.date_input("📅 Select Date", value=st.session_state.selected_day, max_value=date.today())
@@ -225,7 +229,7 @@ with col2:
 
 with col3:
     if st.button("↩️\nUndo\nLast", key="undo_btn"):
-        # undo from queue first (unflushed), else from DB
+        # Undo from queue first (unflushed), else from DB
         idx = next((i for i in range(len(st.session_state.queue)-1, -1, -1)
                     if st.session_state.queue[i][1] == st.session_state.selected_day), None)
         if idx is not None:
@@ -249,19 +253,19 @@ a.metric("Total", s["total"])
 b.metric("Operational", s["operational"])
 c.metric("Opportunities", s["opportunities"])
 
-# attempt background flush if due (non-blocking)
+# background flush if due (non-blocking)
 flush_if_needed(force=False)
 
-# ---------------- Admin / self-healing ----------------
+# --------------- Admin ---------------
 with st.expander("🛠️ Admin"):
-    colA, colB = st.columns([1,1])
+    colA, colB = st.columns([1, 1])
     with colA:
         st.write("Schema status:",
                  "✅ `day` column present" if has_day_column() else "❌ `day` column missing")
     with colB:
         if st.button("Fix DB schema (add `day`)"):
             try:
-                init_db()  # runs ALTER ... ADD COLUMN IF NOT EXISTS
+                init_db()
                 st.success("Schema updated. Reload the page.")
             except Exception:
                 st.error("Failed to update schema. Check DB_URL/permissions.")
