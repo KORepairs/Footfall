@@ -5,7 +5,7 @@ from datetime import date
 st.set_page_config(page_title="KO Repairs Footfall Tracker", layout="centered")
 
 # Use your Railway secret variable
-DB_URL = st.secrets["DB_URL"]
+DB_URL = st.secrets["postgresql://postgres:ZhoNPDvxWQDXpFlevGvWFPGxIeStGcde@postgres.railway.internal:5432/railway"]
 
 # ---------- Database helpers ----------
 def get_conn():
