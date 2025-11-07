@@ -3,7 +3,7 @@ from datetime import date
 from typing import List, Tuple
 
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh  # <- auto-refresh helper
+from streamlit_autorefresh import st_autorefresh
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
 
@@ -24,28 +24,60 @@ def get_db():
     return conn
 
 def init_db():
+    """Ensure table exists; add 'day' if missing; add indexes."""
     conn = get_db()
     with conn.cursor() as cur:
+        # Create base table (earlier versions had no 'day' column)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS footfall (
                 id SERIAL PRIMARY KEY,
                 ts TIMESTAMP NOT NULL DEFAULT NOW(),
-                day DATE NOT NULL DEFAULT CURRENT_DATE,
                 type VARCHAR(20) NOT NULL CHECK (type IN ('total','operational')),
                 count INTEGER NOT NULL DEFAULT 1
             );
         """)
+        # Add missing 'day' column (idempotent)
+        cur.execute("""
+            ALTER TABLE footfall
+            ADD COLUMN IF NOT EXISTS day DATE NOT NULL DEFAULT CURRENT_DATE;
+        """)
+        # Helpful indexes
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_footfall_day ON footfall(day);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_footfall_ts_date ON footfall((DATE(ts)));")
 
-def db_summary_for_day(d: date) -> Tuple[int, int]:
+def has_day_column() -> bool:
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT
-              COALESCE(SUM(CASE WHEN type='total' THEN count END),0) AS total,
-              COALESCE(SUM(CASE WHEN type='operational' THEN count END),0) AS operational
-            FROM footfall
-            WHERE day = %s;
-        """, (d,))
+            SELECT EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name='footfall' AND column_name='day'
+            ) AS has_day;
+        """)
+        return bool(cur.fetchone()["has_day"])
+
+def db_summary_for_day(d: date) -> Tuple[int, int]:
+    """Return (total, operational) for a given day.
+       Works even if old rows pre-date the 'day' column."""
+    conn = get_db()
+    with conn.cursor() as cur:
+        if has_day_column():
+            cur.execute("""
+                SELECT
+                  COALESCE(SUM(CASE WHEN type='total' THEN count END),0) AS total,
+                  COALESCE(SUM(CASE WHEN type='operational' THEN count END),0) AS operational
+                FROM footfall
+                WHERE day = %s;
+            """, (d,))
+        else:
+            # Fallback for earliest installs (shouldn't happen after init_db)
+            cur.execute("""
+                SELECT
+                  COALESCE(SUM(CASE WHEN type='total' THEN count END),0) AS total,
+                  COALESCE(SUM(CASE WHEN type='operational' THEN count END),0) AS operational
+                FROM footfall
+                WHERE DATE(ts) = %s;
+            """, (d,))
         r = cur.fetchone() or {"total": 0, "operational": 0}
         return (r["total"] or 0, r["operational"] or 0)
 
@@ -53,16 +85,28 @@ def db_undo_last_for_day(d: date) -> bool:
     """Remove most recent flushed DB entry for the selected day."""
     conn = get_db()
     with conn.cursor() as cur:
-        cur.execute("""
-            DELETE FROM footfall
-            WHERE id = (
-                SELECT id FROM footfall
-                WHERE day = %s
-                ORDER BY id DESC
-                LIMIT 1
-            )
-            RETURNING id;
-        """, (d,))
+        if has_day_column():
+            cur.execute("""
+                DELETE FROM footfall
+                WHERE id = (
+                    SELECT id FROM footfall
+                    WHERE day = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+                RETURNING id;
+            """, (d,))
+        else:
+            cur.execute("""
+                DELETE FROM footfall
+                WHERE id = (
+                    SELECT id FROM footfall
+                    WHERE DATE(ts) = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+                RETURNING id;
+            """, (d,))
         return cur.fetchone() is not None
 
 def db_flush_batch(rows: List[Tuple[str, date, int]]):
@@ -202,6 +246,19 @@ c.metric("Opportunities", s["opportunities"])
 # attempt background flush if due (non-blocking)
 flush_if_needed(force=False)
 
+# ---------------- Admin / self-healing ----------------
+with st.expander("🛠️ Admin"):
+    colA, colB = st.columns([1,1])
+    with colA:
+        st.write("Schema status:",
+                 "✅ `day` column present" if has_day_column() else "❌ `day` column missing")
+    with colB:
+        if st.button("Fix DB schema (add `day`)"):
+            try:
+                init_db()  # runs ALTER ... ADD COLUMN IF NOT EXISTS
+                st.success("Schema updated. Reload the page.")
+            except Exception:
+                st.error("Failed to update schema. Check DB_URL/permissions.")
 st.caption(
     "Green = everyone entering; Amber = repair visits. "
     "Clicks are queued for speed and synced every 10 min (or when queue is large / Sync Now). "
