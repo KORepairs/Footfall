@@ -1,5 +1,6 @@
 import time
 from datetime import date
+import os
 
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -13,7 +14,15 @@ st.set_page_config(
     layout="centered"
 )
 
-DB_URL = st.secrets["DB_URL"]  # e.g. .../railway?sslmode=require
+# --------------- DB config ---------------
+# Prefer Streamlit secret, fall back to env var (for local dev)
+DB_URL = None
+try:
+    if "DB_URL" in st.secrets:
+        DB_URL = st.secrets["DB_URL"]
+except Exception:
+    # st.secrets might not be available outside Streamlit Cloud
+    DB_URL = os.getenv("DB_URL")
 
 # Batch/flush settings
 FLUSH_SECONDS = 600   # flush every 10 minutes
@@ -23,9 +32,21 @@ FLUSH_MAX = 50        # or when queue reaches this many rows
 @st.cache_resource(show_spinner=False)
 def get_db():
     """Keep a persistent DB connection for speed."""
-    conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
-    conn.autocommit = True
-    return conn
+    if not DB_URL:
+        st.error(
+            "❌ Database URL is not configured.\n\n"
+            "Set `DB_URL` in your Streamlit secrets or `DB_URL` environment variable."
+        )
+        st.stop()
+
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+        conn.autocommit = True
+        return conn
+    except Exception as e:
+        st.error(f"❌ Could not connect to the database:\n\n`{e}`")
+        st.stop()
+
 
 def init_db():
     """Ensure table exists; add 'day' if missing; add indexes."""
@@ -116,8 +137,14 @@ def db_flush_batch(rows):
     with conn.cursor() as cur:
         execute_values(cur, "INSERT INTO footfall (type, day, count) VALUES %s", rows)
 
-# --------------- App state ---------------
-init_db()
+# --------------- App state / DB init ---------------
+if "db_initialised" not in st.session_state:
+    try:
+        init_db()
+        st.session_state["db_initialised"] = True
+    except Exception as e:
+        st.error(f"Failed to initialise database: `{e}`")
+        st.stop()
 
 if "selected_day" not in st.session_state:
     st.session_state.selected_day = date.today()
@@ -260,8 +287,10 @@ flush_if_needed(force=False)
 with st.expander("🛠️ Admin"):
     colA, colB = st.columns([1, 1])
     with colA:
-        st.write("Schema status:",
-                 "✅ `day` column present" if has_day_column() else "❌ `day` column missing")
+        st.write(
+            "Schema status:",
+            "✅ `day` column present" if has_day_column() else "❌ `day` column missing"
+        )
     with colB:
         if st.button("Fix DB schema (add `day`)"):
             try:
