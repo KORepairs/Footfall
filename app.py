@@ -1,6 +1,7 @@
 import time
 from datetime import date
 import os
+from urllib.parse import urlparse
 
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -15,14 +16,28 @@ st.set_page_config(
 )
 
 # --------------- DB config ---------------
-# Prefer Streamlit secret, fall back to env var (for local dev)
+# Try secrets first, then environment variables.
 DB_URL = None
 try:
+    # Streamlit Cloud / secrets.toml
     if "DB_URL" in st.secrets:
         DB_URL = st.secrets["DB_URL"]
+    elif "DATABASE_URL" in st.secrets:
+        DB_URL = st.secrets["DATABASE_URL"]
 except Exception:
-    # st.secrets might not be available outside Streamlit Cloud
-    DB_URL = os.getenv("DB_URL")
+    # Fall back to environment vars for local dev / other hosts
+    pass
+
+if not DB_URL:
+    DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
+
+# Optional: show which host we're actually using (for debugging ONLY)
+if DB_URL:
+    parsed = urlparse(DB_URL)
+    host = parsed.hostname or "UNKNOWN"
+    st.info(f"🔍 DB debug — using host: `{host}`")
+else:
+    st.info("🔍 DB debug — no DB_URL / DATABASE_URL configured yet.")
 
 # Batch/flush settings
 FLUSH_SECONDS = 600   # flush every 10 minutes
@@ -35,7 +50,7 @@ def get_db():
     if not DB_URL:
         st.error(
             "❌ Database URL is not configured.\n\n"
-            "Set `DB_URL` in your Streamlit secrets or `DB_URL` environment variable."
+            "Set `DB_URL` or `DATABASE_URL` in your Streamlit secrets or environment."
         )
         st.stop()
 
