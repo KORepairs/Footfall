@@ -158,6 +158,29 @@ def db_staff_summary_for_day(d):
     return totals
 
 
+def db_undo_last_staff_interaction(staff_member, d):
+    """Undo the most recent front-counter staff interaction for one staff member."""
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM staff_interaction_events
+            WHERE id = (
+                SELECT id
+                FROM staff_interaction_events
+                WHERE interaction_date = %s
+                  AND staff_member = %s
+                  AND source_system = 'front_counter'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            )
+            RETURNING id
+            """,
+            (d, staff_member),
+        )
+        return cur.fetchone() is not None
+
+
 def db_summary_for_day(d):
     conn = get_db()
     with conn.cursor() as cur:
@@ -372,6 +395,23 @@ with st.expander("🛠️ Admin"):
             st.rerun()
         else:
             st.info("No new-style front-counter entries to remove for this date.")
+
+    st.write("Staff interaction corrections")
+    u1, u2 = st.columns(2)
+    with u1:
+        if st.button("↩️ Undo last Jordan interaction", use_container_width=True):
+            if db_undo_last_staff_interaction("Jordan", st.session_state.selected_day):
+                st.success("Last Jordan interaction removed.")
+                st.rerun()
+            else:
+                st.info("No Jordan interactions to undo for this date.")
+    with u2:
+        if st.button("↩️ Undo last Laura interaction", use_container_width=True):
+            if db_undo_last_staff_interaction("Laura", st.session_state.selected_day):
+                st.success("Last Laura interaction removed.")
+                st.rerun()
+            else:
+                st.info("No Laura interactions to undo for this date.")
 
     if DB_URL:
         parsed = urlparse(DB_URL)
