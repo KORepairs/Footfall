@@ -1,6 +1,7 @@
 import time
 from datetime import date
 import os
+import uuid
 from urllib.parse import urlparse
 
 import streamlit as st
@@ -79,37 +80,82 @@ def init_db():
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_footfall_day ON footfall(day);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_footfall_ts_date ON footfall((DATE(ts)));")
+        cur.execute("""
+            ALTER TABLE footfall
+            ADD COLUMN IF NOT EXISTS event_group_id UUID;
+        """)
+        cur.execute("""
+            ALTER TABLE footfall
+            ADD COLUMN IF NOT EXISTS parent_event_id INTEGER REFERENCES footfall(id);
+        """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_footfall_category ON footfall(category);")
 
 
 def db_add_interaction(category, d):
-    """
-    Add one front-counter interaction immediately.
-
-    Every category creates one `total` row so historical Total still works.
-    Drop-off and Pick-up also create an `operational` row so the existing
-    Opportunities = Total - Operational logic remains compatible.
-    The category is stored only on the total row, preventing double-counting
-    when Mega Dash groups by category.
-    """
+    """Add one front-counter interaction; drop/pick companion is linked atomically."""
     operational_categories = {"drop_off", "pick_up"}
+    conn = get_db()
+    event_group_id = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        if category in operational_categories:
+            cur.execute(
+                """
+                WITH primary_event AS (
+                    INSERT INTO footfall
+                        (type, day, count, category, source, event_group_id)
+                    VALUES ('total', %s, 1, %s, 'front_counter', %s::uuid)
+                    RETURNING id
+                )
+                INSERT INTO footfall
+                    (type, day, count, category, source, event_group_id, parent_event_id)
+                SELECT 'operational', %s, 1, NULL, 'front_counter', %s::uuid, id
+                FROM primary_event
+                """,
+                (d, category, event_group_id, d, event_group_id),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO footfall
+                    (type, day, count, category, source, event_group_id)
+                VALUES ('total', %s, 1, %s, 'front_counter', %s::uuid)
+                """,
+                (d, category, event_group_id),
+            )
+
+
+def db_add_staff_interaction(staff_member, d):
+    """Record staff coverage only; this never changes footfall."""
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO footfall (type, day, count, category, source)
-            VALUES ('total', %s, 1, %s, 'front_counter')
+            INSERT INTO staff_interaction_events
+                (interaction_date, staff_member, count, source_system, notes)
+            VALUES (%s, %s, 1, 'front_counter', NULL)
             """,
-            (d, category),
+            (d, staff_member),
         )
-        if category in operational_categories:
-            cur.execute(
-                """
-                INSERT INTO footfall (type, day, count, category, source)
-                VALUES ('operational', %s, 1, NULL, 'front_counter')
-                """,
-                (d,),
-            )
+
+
+def db_staff_summary_for_day(d):
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT staff_member, COALESCE(SUM(count), 0) AS total
+            FROM staff_interaction_events
+            WHERE interaction_date = %s
+              AND staff_member IN ('Jordan', 'Laura')
+            GROUP BY staff_member
+            """,
+            (d,),
+        )
+        rows = cur.fetchall()
+    totals = {"Jordan": 0, "Laura": 0}
+    for row in rows:
+        totals[row["staff_member"]] = row["total"] or 0
+    return totals
 
 
 def db_summary_for_day(d):
@@ -151,7 +197,7 @@ def db_undo_last_interaction(d):
     with conn.cursor() as cur:
         # Find the latest categorised total row.
         cur.execute("""
-            SELECT id, category
+            SELECT id, category, event_group_id
             FROM footfall
             WHERE day = %s
               AND type = 'total'
@@ -166,27 +212,27 @@ def db_undo_last_interaction(d):
 
         total_id = row["id"]
         category = row["category"]
+        event_group_id = row.get("event_group_id")
 
-        # Delete the total/category row first.
-        cur.execute("DELETE FROM footfall WHERE id = %s;", (total_id,))
-
-        # Drop-off and Pick-up generate a second operational row immediately
-        # after the total row, so remove the nearest matching operational row.
-        if category in {"drop_off", "pick_up"}:
+        if event_group_id:
+            # Delete linked companion first because parent_event_id references primary.
+            cur.execute(
+                "DELETE FROM footfall WHERE parent_event_id = %s OR (event_group_id = %s AND type = 'operational');",
+                (total_id, event_group_id),
+            )
+        elif category in {"drop_off", "pick_up"}:
+            # Legacy fallback for older unlinked Streamlit pairs only.
             cur.execute("""
                 DELETE FROM footfall
                 WHERE id = (
-                    SELECT id
-                    FROM footfall
-                    WHERE day = %s
-                      AND type = 'operational'
-                      AND source = 'front_counter'
-                      AND id > %s
-                    ORDER BY id ASC
-                    LIMIT 1
+                    SELECT id FROM footfall
+                    WHERE day = %s AND type = 'operational'
+                      AND source = 'front_counter' AND id > %s
+                    ORDER BY id ASC LIMIT 1
                 );
             """, (d, total_id))
 
+        cur.execute("DELETE FROM footfall WHERE id = %s;", (total_id,))
         return True
 
 
@@ -276,6 +322,27 @@ with r2c2:
     category_button("📤\nPick Up", "pick_up", "Pick-up saved")
 with r2c3:
     category_button("💬\nGeneral", "general", "General visit saved")
+
+st.subheader("Staff interactions")
+st.caption("Use these only when Jordan or Laura independently deals with someone. They do not add to footfall.")
+staff_counts = db_staff_summary_for_day(st.session_state.selected_day)
+jc, lc = st.columns(2)
+with jc:
+    if st.button(f"👤 Jordan +1  ·  {staff_counts['Jordan']} handled", key="staff_jordan", use_container_width=True):
+        try:
+            db_add_staff_interaction("Jordan", st.session_state.selected_day)
+            st.toast("Jordan interaction saved", icon="✅")
+            st.rerun()
+        except Exception as e:
+            st.toast(f"Not saved: {e}", icon="⚠️")
+with lc:
+    if st.button(f"👤 Laura +1  ·  {staff_counts['Laura']} handled", key="staff_laura", use_container_width=True):
+        try:
+            db_add_staff_interaction("Laura", st.session_state.selected_day)
+            st.toast("Laura interaction saved", icon="✅")
+            st.rerun()
+        except Exception as e:
+            st.toast(f"Not saved: {e}", icon="⚠️")
 
 st.divider()
 
