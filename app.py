@@ -1,5 +1,6 @@
 import time
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 import os
 import uuid
 from urllib.parse import urlparse
@@ -191,7 +192,6 @@ def db_summary_for_day(d):
                 COALESCE(SUM(CASE WHEN category='retail_enquiry' THEN count ELSE 0 END), 0) AS retail_enquiry,
                 COALESCE(SUM(CASE WHEN category='repair_enquiry' THEN count ELSE 0 END), 0) AS repair_enquiry,
                 COALESCE(SUM(CASE WHEN category='trade_in_enquiry' THEN count ELSE 0 END), 0) AS trade_in_enquiry,
-                COALESCE(SUM(CASE WHEN category='repair_status_update' THEN count ELSE 0 END), 0) AS repair_status_update,
                 COALESCE(SUM(CASE WHEN category='drop_off' THEN count ELSE 0 END), 0) AS drop_off,
                 COALESCE(SUM(CASE WHEN category='pick_up' THEN count ELSE 0 END), 0) AS pick_up,
                 COALESCE(SUM(CASE WHEN category='general' THEN count ELSE 0 END), 0) AS general
@@ -202,19 +202,15 @@ def db_summary_for_day(d):
 
     total = r.get("total", 0) or 0
     operational = r.get("operational", 0) or 0
-    drop_off = r.get("drop_off", 0) or 0
-    pick_up = r.get("pick_up", 0) or 0
-    repair_status_update = r.get("repair_status_update", 0) or 0
     return {
         "total": total,
         "operational": operational,
-        "opportunities": max(0, total - drop_off - pick_up - repair_status_update),
+        "opportunities": max(0, total - operational),
         "retail_enquiry": r.get("retail_enquiry", 0) or 0,
         "repair_enquiry": r.get("repair_enquiry", 0) or 0,
         "trade_in_enquiry": r.get("trade_in_enquiry", 0) or 0,
-        "repair_status_update": repair_status_update,
-        "drop_off": drop_off,
-        "pick_up": pick_up,
+        "drop_off": r.get("drop_off", 0) or 0,
+        "pick_up": r.get("pick_up", 0) or 0,
         "general": r.get("general", 0) or 0,
     }
 
@@ -264,6 +260,231 @@ def db_undo_last_interaction(d):
         return True
 
 
+
+# --------------- Remote customer contacts ---------------
+REMOTE_CHANNELS = [
+    ("📞", "Phone", "phone"),
+    ("📘", "Facebook", "facebook"),
+    ("🟢", "WhatsApp", "whatsapp"),
+    ("🛒", "eBay", "ebay"),
+    ("✉️", "Email", "email"),
+    ("💬", "Text System", "other"),
+]
+
+CONTACT_KIND_LABELS = {
+    "new_enquiry": "New Enquiry",
+    "follow_up": "Existing / Follow-up",
+}
+
+REMOTE_STAFF = ("Josh", "Jordan", "Laura")
+
+
+def db_add_remote_contact(channel, staff_member, contact_kind, d):
+    """Add one phone/message contact to Mega Dash's canonical enquiries table."""
+    conn = get_db()
+    now_london = datetime.now(ZoneInfo("Europe/London"))
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO enquiries (
+                id,
+                enquiry_date,
+                interaction_time,
+                channel,
+                staff_member,
+                source_system,
+                contact_kind,
+                created_at,
+                updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, 'front_counter', %s, NOW(), NOW())
+            """,
+            (
+                str(uuid.uuid4()),
+                d,
+                now_london.time().replace(tzinfo=None),
+                channel,
+                staff_member,
+                contact_kind,
+            ),
+        )
+
+
+def db_remote_summary_for_day(d):
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE channel IS NOT NULL) AS total,
+                COUNT(*) FILTER (WHERE contact_kind = 'new_enquiry') AS new_enquiries,
+                COUNT(*) FILTER (WHERE contact_kind = 'follow_up') AS follow_ups,
+                COUNT(*) FILTER (WHERE contact_kind IS NULL) AS unclassified,
+                COUNT(*) FILTER (WHERE channel = 'phone') AS phone,
+                COUNT(*) FILTER (WHERE channel = 'facebook') AS facebook,
+                COUNT(*) FILTER (WHERE channel = 'whatsapp') AS whatsapp,
+                COUNT(*) FILTER (WHERE channel = 'ebay') AS ebay,
+                COUNT(*) FILTER (WHERE channel = 'email') AS email,
+                COUNT(*) FILTER (WHERE channel = 'website') AS website,
+                COUNT(*) FILTER (WHERE channel = 'other') AS other
+            FROM enquiries
+            WHERE enquiry_date = %s
+              AND channel IS NOT NULL
+            """,
+            (d,),
+        )
+        row = cur.fetchone() or {}
+
+        cur.execute(
+            """
+            SELECT staff_member, COUNT(*) AS total
+            FROM enquiries
+            WHERE enquiry_date = %s
+              AND channel IS NOT NULL
+              AND staff_member IN ('Josh', 'Jordan', 'Laura')
+            GROUP BY staff_member
+            """,
+            (d,),
+        )
+        staff_rows = cur.fetchall()
+
+    summary = {k: (row.get(k, 0) or 0) for k in (
+        "total", "new_enquiries", "follow_ups", "unclassified",
+        "phone", "facebook", "whatsapp", "ebay", "email", "website", "other"
+    )}
+    summary["staff"] = {"Josh": 0, "Jordan": 0, "Laura": 0}
+    for staff_row in staff_rows:
+        summary["staff"][staff_row["staff_member"]] = staff_row["total"] or 0
+    return summary
+
+
+def db_undo_last_remote_contact(d):
+    """Undo exactly the most recent Streamlit-created remote contact for the selected day."""
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM enquiries
+            WHERE id = (
+                SELECT id
+                FROM enquiries
+                WHERE enquiry_date = %s
+                  AND channel IS NOT NULL
+                  AND source_system = 'front_counter'
+                ORDER BY created_at DESC, interaction_time DESC, id DESC
+                LIMIT 1
+            )
+            RETURNING id
+            """,
+            (d,),
+        )
+        return cur.fetchone() is not None
+
+
+def render_messages_calls_page():
+    st.title("KO Repairs — Messages / Calls")
+    st.caption("Count every incoming contact. Mark it New only when it is a new enquiry/person; repeat messages or calls are Follow-up.")
+
+    selected = st.date_input(
+        "📅 Select Date",
+        value=st.session_state.remote_selected_day,
+        max_value=date.today(),
+        key="remote_date",
+    )
+    st.session_state.remote_selected_day = selected
+
+    st.subheader("Who handled it?")
+    staff = st.segmented_control(
+        "Staff",
+        options=list(REMOTE_STAFF),
+        default=st.session_state.remote_staff,
+        label_visibility="collapsed",
+        key="remote_staff_control",
+    )
+    if staff:
+        st.session_state.remote_staff = staff
+
+    st.subheader("What kind of contact?")
+    kind = st.segmented_control(
+        "Contact kind",
+        options=["new_enquiry", "follow_up"],
+        format_func=lambda x: CONTACT_KIND_LABELS[x],
+        default=st.session_state.remote_contact_kind,
+        label_visibility="collapsed",
+        key="remote_kind_control",
+    )
+    if kind:
+        st.session_state.remote_contact_kind = kind
+
+    st.caption(
+        "New Enquiry = first contact from that enquiry/person. "
+        "Existing / Follow-up = another message/call from someone already counted."
+    )
+
+    def remote_button(icon, label, channel):
+        if st.button(f"{icon}\n{label}", key=f"remote_{channel}", use_container_width=True):
+            try:
+                db_add_remote_contact(
+                    channel,
+                    st.session_state.remote_staff,
+                    st.session_state.remote_contact_kind,
+                    st.session_state.remote_selected_day,
+                )
+                st.toast(
+                    f"{label} · {CONTACT_KIND_LABELS[st.session_state.remote_contact_kind]} · "
+                    f"{st.session_state.remote_staff}",
+                    icon="✅",
+                )
+                st.rerun()
+            except Exception as e:
+                st.toast(f"Not saved: {e}", icon="⚠️")
+
+    r1 = st.columns(3)
+    for col, item in zip(r1, REMOTE_CHANNELS[:3]):
+        with col:
+            remote_button(*item)
+
+    r2 = st.columns(3)
+    for col, item in zip(r2, REMOTE_CHANNELS[3:]):
+        with col:
+            remote_button(*item)
+
+    summary = db_remote_summary_for_day(st.session_state.remote_selected_day)
+
+    st.divider()
+    a, b, c = st.columns(3)
+    a.metric("Total Contacts", summary["total"])
+    b.metric("New Enquiries", summary["new_enquiries"])
+    c.metric("Follow-ups", summary["follow_ups"])
+
+    st.subheader("By channel")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Phone", summary["phone"])
+    c2.metric("Facebook", summary["facebook"])
+    c3.metric("WhatsApp", summary["whatsapp"])
+    c4, c5, c6 = st.columns(3)
+    c4.metric("eBay", summary["ebay"])
+    c5.metric("Email", summary["email"])
+    c6.metric("Text System", summary["other"])
+
+    st.subheader("Handled by")
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Josh", summary["staff"]["Josh"])
+    s2.metric("Jordan", summary["staff"]["Jordan"])
+    s3.metric("Laura", summary["staff"]["Laura"])
+
+    if summary["unclassified"]:
+        st.caption(f"Unclassified legacy contacts: {summary['unclassified']}")
+
+    with st.expander("🛠️ Admin"):
+        if st.button("↩️ Undo last message / call", use_container_width=True):
+            if db_undo_last_remote_contact(st.session_state.remote_selected_day):
+                st.success("Last Streamlit message/call removed.")
+                st.rerun()
+            else:
+                st.info("No Streamlit message/call entries to undo for this date.")
+
+
 # --------------- App state / DB init ---------------
 if "db_initialised" not in st.session_state:
     try:
@@ -275,6 +496,13 @@ if "db_initialised" not in st.session_state:
 
 if "selected_day" not in st.session_state:
     st.session_state.selected_day = date.today()
+
+if "remote_selected_day" not in st.session_state:
+    st.session_state.remote_selected_day = date.today()
+if "remote_staff" not in st.session_state:
+    st.session_state.remote_staff = "Josh"
+if "remote_contact_kind" not in st.session_state:
+    st.session_state.remote_contact_kind = "new_enquiry"
 
 # Auto-refresh summaries every 15 seconds.
 st_autorefresh(interval=15000, key="tick")
@@ -313,6 +541,18 @@ details div[data-testid="stButton"] > button {
 """, unsafe_allow_html=True)
 
 # --------------- UI ---------------
+page = st.radio(
+    "Page",
+    ["🏪 Front Counter", "💬 Messages / Calls"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="app_page",
+)
+
+if page == "💬 Messages / Calls":
+    render_messages_calls_page()
+    st.stop()
+
 st.title("KO Repairs — Front Counter")
 
 selected = st.date_input(
@@ -350,10 +590,6 @@ with r2c2:
     category_button("📤\nPick Up", "pick_up", "Pick-up saved")
 with r2c3:
     category_button("💬\nGeneral", "general", "General visit saved")
-
-r3c1, r3c2, r3c3 = st.columns(3)
-with r3c1:
-    category_button("🔄\nRepair Status Update", "repair_status_update", "Repair status update saved")
 
 st.subheader("Staff interactions")
 st.caption("Use these only when Jordan or Laura independently deals with someone. They do not add to footfall.")
@@ -396,9 +632,6 @@ d.metric("Drop Offs", s["drop_off"])
 e.metric("Pick Ups", s["pick_up"])
 f.metric("General", s["general"])
 
-g, _, _ = st.columns(3)
-g.metric("Repair Status Updates", s["repair_status_update"])
-
 with st.expander("🛠️ Admin"):
     st.write("Clicks are written to PostgreSQL immediately — no 10-minute queue.")
     if st.button("↩️ Undo last front-counter entry"):
@@ -432,6 +665,5 @@ with st.expander("🛠️ Admin"):
 st.caption(
     "Every button counts one person through the door. "
     "Drop Off and Pick Up are also counted as operational visits. "
-    "Repair Status Updates count as interactions but not opportunities. "
     "Retail, Repair, Trade-in and General count as opportunities."
 )
