@@ -302,7 +302,7 @@ def db_add_remote_contact(channel, staff_member, contact_kind, d):
             (
                 str(uuid.uuid4()),
                 d,
-                now_london.time().replace(tzinfo=None),
+                now_london,
                 channel,
                 staff_member,
                 contact_kind,
