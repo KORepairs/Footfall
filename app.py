@@ -194,7 +194,8 @@ def db_summary_for_day(d):
                 COALESCE(SUM(CASE WHEN category='trade_in_enquiry' THEN count ELSE 0 END), 0) AS trade_in_enquiry,
                 COALESCE(SUM(CASE WHEN category='drop_off' THEN count ELSE 0 END), 0) AS drop_off,
                 COALESCE(SUM(CASE WHEN category='pick_up' THEN count ELSE 0 END), 0) AS pick_up,
-                COALESCE(SUM(CASE WHEN category='general' THEN count ELSE 0 END), 0) AS general
+                COALESCE(SUM(CASE WHEN category='general' THEN count ELSE 0 END), 0) AS general,
+                COALESCE(SUM(CASE WHEN category='repair_status_update' THEN count ELSE 0 END), 0) AS repair_status_update
             FROM footfall
             WHERE day = %s;
         """, (d,))
@@ -202,16 +203,20 @@ def db_summary_for_day(d):
 
     total = r.get("total", 0) or 0
     operational = r.get("operational", 0) or 0
+    drop_off = r.get("drop_off", 0) or 0
+    pick_up = r.get("pick_up", 0) or 0
+    repair_status_update = r.get("repair_status_update", 0) or 0
     return {
         "total": total,
         "operational": operational,
-        "opportunities": max(0, total - operational),
+        "opportunities": max(0, total - drop_off - pick_up - repair_status_update),
         "retail_enquiry": r.get("retail_enquiry", 0) or 0,
         "repair_enquiry": r.get("repair_enquiry", 0) or 0,
         "trade_in_enquiry": r.get("trade_in_enquiry", 0) or 0,
         "drop_off": r.get("drop_off", 0) or 0,
         "pick_up": r.get("pick_up", 0) or 0,
         "general": r.get("general", 0) or 0,
+        "repair_status_update": repair_status_update,
     }
 
 
@@ -591,6 +596,10 @@ with r2c2:
 with r2c3:
     category_button("💬\nGeneral", "general", "General visit saved")
 
+r3c1, r3c2, r3c3 = st.columns([1, 2, 1])
+with r3c2:
+    category_button("🔄\nRepair Status Update", "repair_status_update", "Repair status update saved")
+
 st.subheader("Staff interactions")
 st.caption("Use these only when Jordan or Laura independently deals with someone. They do not add to footfall.")
 staff_counts = db_staff_summary_for_day(st.session_state.selected_day)
@@ -632,6 +641,10 @@ d.metric("Drop Offs", s["drop_off"])
 e.metric("Pick Ups", s["pick_up"])
 f.metric("General", s["general"])
 
+rsu1, rsu2, rsu3 = st.columns([1, 2, 1])
+with rsu2:
+    st.metric("Repair Status Updates", s["repair_status_update"])
+
 with st.expander("🛠️ Admin"):
     st.write("Clicks are written to PostgreSQL immediately — no 10-minute queue.")
     if st.button("↩️ Undo last front-counter entry"):
@@ -663,7 +676,8 @@ with st.expander("🛠️ Admin"):
         st.caption(f"DB host: {parsed.hostname or 'UNKNOWN'}")
 
 st.caption(
-    "Every button counts one person through the door. "
-    "Drop Off and Pick Up are also counted as operational visits. "
+    "Every main Front Counter button counts one physical interaction. "
+    "Drop Off and Pick Up are operational visits. "
+    "Repair Status Update counts as an interaction but not an opportunity. "
     "Retail, Repair, Trade-in and General count as opportunities."
 )
